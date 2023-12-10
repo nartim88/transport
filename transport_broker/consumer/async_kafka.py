@@ -41,9 +41,15 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
     """Asynchronous Kafka consumer.
 
     Attributes:
+        MSG_WAIT_TIME: Time in seconds to wait when no messages are.
+
+    Args:
         broker: Broker address host[:port].
+        group_id: Kafka Consumer group.
         condition: Asyncio Condition object.
+        extra_consumer_configs: Additional AIOKafkaConsumer configuration.
         flags: _no_msgs flags according to topics.
+        getmany_configs: `getmany` meth configuration.
         semaphore: Asyncio Semaphore object.
         topic: Topic to subscribe to.
         topics: Topics with priorities.
@@ -51,8 +57,6 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
     """
     logger = logging.getLogger(__name__)
 
-    DEFAULT_GETMANY_CONFS: dict[str, str] = {}
-    DEFAULT_CONSUMER_CONFS: dict[str, str] = {}
     MSG_WAIT_TIME: float = 1.0
 
     _instances: set = set()
@@ -63,43 +67,34 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
             group_id: str,
             cached_topics: dict[str, int] | None = None,
             condition: asyncio.Condition | None = None,
+            extra_consumer_configs: dict[str] | None = None,
             flags: dict[str, asyncio.Event] | None = None,
+            getmany_configs: dict[str] | None = None,
             semaphore: asyncio.Semaphore | None = None,
             topic: str | None = None,
             topics: dict[str, int] | None = None,
     ):
         """Consumer initialization."""
-        self.broker: str = broker
         self.admin_client: AIOKafkaAdminClient | None = None
         self.background_tasks: set = set()
         self.cached_topics: dict[str, int] | None = cached_topics
+        self.closing: bool = False
         self.condition: asyncio.Condition | None = condition
         self.consumer: AIOKafkaConsumer | None = None
-        self.closing: bool = False
         self.flags: dict[str, asyncio.Event] | None = flags
         self.need_recon: bool = False
         self.need_stop: asyncio.Event = asyncio.Event()
         self.sec_consumer: type[KafkaRootConsumer] | None = None
         self.semaphore: asyncio.Semaphore | None = semaphore
-        self.topic: str | None = topic
         self.topics: dict[str, int] | None = topics
         self._no_msgs: asyncio.Event = asyncio.Event()
 
         # consumer confs
-        self.api_version: str = "auto"
-        self.auto_offset_reset = None
-        self.enable_auto_commit = None
-        self.heartbeat_interval_ms = None
-        self.max_poll_interval_ms = None
-        self.poll_update_offsets = None
-        self.session_timeout_ms = None
-        self.value_deserializer = None
-        self.group_id = group_id
-
-        # getmany confs
-        self.partitions = None
-        self.poll_timeout_ms = None
-        self.max_poll_records = None
+        self.broker: str = broker
+        self.extra_consumer_configs: dict[str] | None = extra_consumer_configs
+        self.getmany_configs: dict[str] | None = getmany_configs
+        self.group_id: str = group_id
+        self.topic: str | None = topic
 
         if self.topic and self.topics:
             raise InitializationError(
@@ -122,8 +117,7 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
                         self.flags[self.topic] = self._no_msgs
 
                     messages = await self.consumer.getmany(
-                        timeout_ms=self.poll_timeout_ms,
-                        max_records=self.max_poll_records,
+                        **self.getmany_configs,
                     )
                     if not messages:
                         self._no_msgs.set()
@@ -243,23 +237,15 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
                 for topic in sorted_topics_by_priority:
                     consumer = self.sec_consumer(
                         primary_consumer=self,
-                        api_version=self.api_version,
-                        auto_offset_reset=self.auto_offset_reset,
                         broker=self.broker,
                         cached_topics=topics,
-                        enable_auto_commit=self.enable_auto_commit,
-                        group_id=topic,
-                        heartbeat_interval_ms=self.heartbeat_interval_ms,
-                        max_poll_interval_ms=self.max_poll_interval_ms,
-                        max_poll_records=self.max_poll_records,
-                        poll_timeout_ms=self.poll_timeout_ms,
-                        poll_update_offsets=self.poll_update_offsets,
-                        session_timeout_ms=self.session_timeout_ms,
                         topic=topic,
-                        value_deserializer=self.value_deserializer,
+                        group_id=topic,
                         condition=self.condition,
                         flags=self.flags,
                         semaphore=self.semaphore,
+                        extra_consumer_configs=self.extra_consumer_configs,
+                        getmany_configs=self.getmany_configs,
                     )
                     task: asyncio.Task = group.create_task(
                         coro=consumer.start_consumer(),
@@ -410,16 +396,9 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
         """
         try:
             self.consumer = AIOKafkaConsumer(
-                api_version=self.api_version,
-                auto_offset_reset=self.auto_offset_reset,
                 bootstrap_servers=self.broker,
-                enable_auto_commit=self.enable_auto_commit,
                 group_id=self.group_id,
-                heartbeat_interval_ms=self.heartbeat_interval_ms,
-                max_poll_interval_ms=self.max_poll_interval_ms,
-                max_poll_records=self.max_poll_records,
-                session_timeout_ms=self.session_timeout_ms,
-                value_deserializer=self.value_deserializer,
+                **self.extra_consumer_configs,
             )
             await self.consumer.start()
             self.closed = False
@@ -571,6 +550,7 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
             raise
 
     async def _create_admin_client(self) -> None:
+        """Create and start kafka admin client."""
         self.admin_client = AIOKafkaAdminClient(bootstrap_servers=self.broker)
         await self.admin_client.start()
 
@@ -624,6 +604,11 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
         """Get current task name."""
         return asyncio.current_task().get_name()
 
+    @property
+    def instances(self) -> set:
+        """Get all consumer instances if list of topics was given."""
+        return AsyncKafkaRootConsumer._instances
+
     @abstractmethod
     async def on_message(self, message: ConsumerRecord) -> None:
         """Message processing.
@@ -649,7 +634,7 @@ class AsyncSecondaryOneTopicConsumer(AsyncKafkaRootConsumer):
         self.primary_consumer = primary_consumer
         self._instances.add(self)
 
-    async def _on_message(self, message):
+    async def on_message(self, message):
         return await self.primary_consumer.on_message(message)
 
 
@@ -778,10 +763,3 @@ class AsyncKafkaConsumerPartitions:
                 f"Shutdown consumer service "
                 f"'{self.__class__.__name__}': OK"
             )
-
-    def _reconnect(self):
-        """Reconnect to the broker."""
-        if self.consumer:
-            self._close()
-        self._connect()
-        self.need_recon = False
