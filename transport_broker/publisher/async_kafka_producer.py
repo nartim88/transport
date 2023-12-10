@@ -1,7 +1,6 @@
 import json
-from typing import Optional
+import logging
 
-from aiokafka.consumer.fetcher import ConsumerRecord  # noqa: F401
 from aiokafka.producer import AIOKafkaProducer
 from aiokafka.errors import (
     KafkaError,
@@ -9,56 +8,68 @@ from aiokafka.errors import (
 )
 
 from transport_broker.exceptions import (
-    KafkaBrokerTimeoutError,
+    BrokerTimeoutError,
+    TransportException,
 )
-from transport_broker.publisher.abstract import AsyncPublisherAbstract
+from transport_broker.publisher.abstract import PublisherAbstract
 
 
-class AsyncKafkaRootPublisher(AsyncPublisherAbstract):
+class AsyncKafkaRootPublisher(PublisherAbstract):
     """Async publisher for Kafka."""
+
+    logger = logging.getLogger(__name__)
+
+    DEFAULT_CONFS: dict[str] = {
+        "acks": "all",
+        "api_version": "auto",
+        "value_serializer": lambda v: json.dumps(v).encode("utf-8"),
+    }
 
     def __init__(
             self,
             broker: str,
-            extra_confs: Optional[dict] = None,
-            acks: str = "all",
-            api_version: str = "auto",
-            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-    ):
-        self.broker = broker
-        self.extra_confs: dict = extra_confs
-        self.acks = acks
-        self.api_version = api_version
-        self.value_serializer = value_serializer
-        self.producer: Optional[AIOKafkaProducer] = None
+            extra_confs: dict[str] | None = None,
+    ) -> None:
+        self.broker: str = broker
+        self.extra_confs: dict[str] = extra_confs
+        self.producer: AIOKafkaProducer | None = None
 
-    async def connect(self):
+    async def connect(self) -> None:
+        """Connect to the broker.
+
+        Raises:
+            TransportException:
+
+        """
         try:
+            self.extra_confs |= AsyncKafkaRootPublisher.DEFAULT_CONFS
             self.producer = AIOKafkaProducer(
                 bootstrap_servers=self.broker,
-                acks=self.acks,
-                api_version=self.api_version,
-                value_serializer=self.value_serializer,
                 **self.extra_confs or {},
             )
             await self.producer.start()
 
         except KafkaError as e:
-            self.logger.exception(f"Kafka error: {e}")
+            raise TransportException(f"Kafka error: {e}")
 
-        except Exception as e:
-            self.logger.exception(f"Unexpected error: {e}")
+        except Exception:
+            raise
 
-    async def send_message(self, message, topic, wait=True):
+    async def send_message(
+            self,
+            message: str,
+            topic: str,
+            wait: bool = True,
+    ) -> None:
         """Send message to the broker.
 
         Args:
-            topic (str): Kafka topic.
+            topic: Kafka topic.
             message: The message we are sending.
-            wait (bool): Wait result or not.
+            wait: Wait result or not.
 
         Raises:
-            KafkaBrokerTimeoutError: Raises when timeout while trying to
+            BrokerTimeoutError: Raises when timeout while trying to
                 send message.
 
         """
@@ -74,19 +85,23 @@ class AsyncKafkaRootPublisher(AsyncPublisherAbstract):
 
         except KafkaTimeoutError as e:
             msg = "Timeout while trying to send message."
-            self.logger.warning(msg)
-            raise KafkaBrokerTimeoutError(msg) from e
+            raise BrokerTimeoutError(f"{msg}: {e}")
 
-    async def send_list_messages(self, messages, topic, wait=True):
+    async def send_list_messages(
+            self,
+            messages: list[str],
+            topic: str,
+            wait: bool = True,
+    ) -> None:
         """Send list of messages to the broker.
 
         Args:
-            topic (str): Kafka topic.
-            messages (list): List of messages.
-            wait (bool): Wait result or not.
+            topic: Kafka topic.
+            messages: List of messages.
+            wait: Wait result or not.
 
         Raises:
-            KafkaBrokerTimeoutError: Raises when timeout while trying to
+            BrokerTimeoutError: Raises when timeout while trying to
                 send messages.
 
         """
@@ -94,14 +109,18 @@ class AsyncKafkaRootPublisher(AsyncPublisherAbstract):
             self.logger.warning("Topic is not specified.")
             return
 
-        for message in messages:
-            await self.send_message(message, topic, wait)
+        try:
+            for message in messages:
+                await self.send_message(message, topic, wait)
 
-    async def close(self):
+        except BrokerTimeoutError:
+            raise
+
+    async def close(self) -> None:
         if self.producer:
             await self.producer.stop()
             self.producer = None
 
-    async def reconnect(self):
+    async def reconnect(self) -> None:
         await self.close()
         await self.connect()
