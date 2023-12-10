@@ -21,7 +21,6 @@ from aiokafka.errors import (
 )
 
 from transport_broker.consumer.abstract import ConsumerAbstract
-from transport_broker.consumer.kafka import KafkaRootConsumer
 from transport_broker.exceptions import (
     AuthorizationError,
     ConsumerCalledError,
@@ -84,7 +83,7 @@ class AsyncKafkaRootConsumer(ConsumerAbstract):
         self.flags: dict[str, asyncio.Event] | None = flags
         self.need_recon: bool = False
         self.need_stop: asyncio.Event = asyncio.Event()
-        self.sec_consumer: type[KafkaRootConsumer] | None = None
+        self.sec_consumer: type[AsyncSecondaryOneTopicConsumer] | None = None
         self.semaphore: asyncio.Semaphore | None = semaphore
         self.topics: dict[str, int] | None = topics
         self._no_msgs: asyncio.Event = asyncio.Event()
