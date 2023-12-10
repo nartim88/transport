@@ -40,5 +40,6 @@ class TopicExistsError(TransportException):
 class NoBrokersAvailable(TransportException):
     """ Raises when broker doesn't available """
 
+
 class InitializationError(Exception):
     """Raises when init errors occur."""
