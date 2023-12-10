@@ -1,0 +1,10 @@
+__pycache__/
+
+# virtualenv
+venv/
+
+# Project settings
+.idea/
+
+# VS code config
+.vscode/
